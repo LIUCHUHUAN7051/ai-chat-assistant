@@ -1,4 +1,4 @@
-"""LangChain AI 聊天助手 — 基于 LangChain 框架的智能对话应用"""
+"""LangChain AI 聊天助手 — 基于 LangChain 1.x 的智能对话应用"""
 
 import json
 import os
@@ -10,11 +10,10 @@ import zoneinfo
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.memory import ConversationBufferMemory
+from langchain.agents import create_agent
 from langchain.tools import tool
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.checkpoint.memory import MemorySaver
 
 # ==================== 工具定义 ====================
 
@@ -91,12 +90,6 @@ def get_ip_info(ip: str = "") -> str:
 
 tools = [get_weather, calculate, get_current_time, get_ip_info]
 
-tool_icons = {
-    "get_weather": "🌤️",
-    "calculate": "🧮",
-    "get_current_time": "🕐",
-    "get_ip_info": "🌐",
-}
 
 # ==================== 初始化 ====================
 
@@ -110,14 +103,7 @@ llm = ChatOpenAI(
     temperature=0.7,
 )
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "你是一个智能 AI 助手。你可以使用工具来获取实时信息（天气、时间、IP 等）"
-     "或进行计算。若用户闲聊，直接回答即可，无需使用工具。回答简洁自然。"),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
+checkpointer = MemorySaver()
 
 # ==================== Streamlit UI ====================
 
@@ -151,11 +137,6 @@ st.markdown("""
         margin:2px 3px; border:1px solid #d1d9e8; transition:all 0.2s;
     }
     .tool-tag:hover { background:#d1d9e8; transform:translateY(-1px); }
-    .step-log {
-        background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px;
-        padding:0.3rem 0.7rem; margin:0.3rem 0; font-size:0.8rem;
-        animation: slideUp 0.3s ease-out;
-    }
     div[data-testid="stChatMessage"] { animation: slideUp 0.3s ease-out; border-radius:12px; }
     div[data-testid="stChatInput"] input {
         border-radius:24px !important; border:1px solid #e5e7eb !important;
@@ -174,7 +155,7 @@ st.markdown("""
 <div class="header">
     <h1>🤖 LangChain AI 助手</h1>
     <p>带对话记忆 · 工具调用 · 多轮对话</p>
-    <span class="badge">⚡ LangChain Framework</span>
+    <span class="badge">⚡ LangChain 1.x + LangGraph</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -188,25 +169,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------- 状态 ----------
-if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-    )
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = "chat-1"
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ---------- 创建 Agent ----------
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    memory=st.session_state.memory,
-    handle_parsing_errors=True,
-    verbose=False,
-    max_iterations=5,
-)
+if "agent" not in st.session_state:
+    st.session_state.agent = create_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=(
+            "你是一个智能 AI 助手。你可以使用工具来获取实时信息"
+            "（天气、时间、IP 等）或进行计算。若用户闲聊，直接回答即可。"
+            "回答简洁自然，使用中文。"
+        ),
+        checkpointer=checkpointer,
+    )
 
 # ---------- 聊天区域 ----------
 if not st.session_state.messages:
@@ -232,30 +211,34 @@ if prompt_input := st.chat_input("试试说「北京天气」「计算 1024×768
         placeholder = st.empty()
         placeholder.markdown("⏳ 思考中...")
 
-        with st.spinner(""):
-            try:
-                response = agent_executor.invoke({"input": prompt_input})
-                placeholder.markdown(response["output"])
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": response["output"]}
-                )
-            except Exception as e:
-                error_msg = f"😅 出错了：{e}"
-                placeholder.markdown(error_msg)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": error_msg}
-                )
+        try:
+            result = st.session_state.agent.invoke(
+                {"messages": [HumanMessage(content=prompt_input)]},
+                config={"configurable": {"thread_id": st.session_state.thread_id}},
+            )
+            ai_msg = result["messages"][-1]
+            reply = ai_msg.content if isinstance(ai_msg, AIMessage) else str(ai_msg)
+            placeholder.markdown(reply)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": reply}
+            )
+        except Exception as e:
+            error_msg = f"😅 出错了：{e}"
+            placeholder.markdown(error_msg)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": error_msg}
+            )
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
-    st.markdown("### 🧠 LangChain 特性展示")
+    st.markdown("### 🧠 LangChain 1.x 特性展示")
     st.markdown("""
     <div style="background:#f8fafc; border-radius:8px; padding:0.8rem; font-size:0.8rem; line-height:1.6;">
-        ✅ <strong>create_tool_calling_agent</strong> — 工具调用 Agent<br>
-        ✅ <strong>ConversationBufferMemory</strong> — 对话记忆<br>
-        ✅ <strong>ChatPromptTemplate</strong> — 结构化提示词<br>
+        ✅ <strong>create_agent</strong> — LangGraph 版 Agent<br>
+        ✅ <strong>MemorySaver</strong> — 对话记忆检查点<br>
         ✅ <strong>@tool 装饰器</strong> — 自定义工具<br>
-        ✅ <strong>AgentExecutor</strong> — 执行与容错<br>
+        ✅ <strong>LangGraph 图执行</strong> — 自动工具循环<br>
+        ✅ <strong>thread_id</strong> — 多会话隔离<br>
         ✅ <strong>DeepSeek + OpenAI 兼容接口</strong>
     </div>
     """, unsafe_allow_html=True)
@@ -271,8 +254,16 @@ with st.sidebar:
     if st.session_state.messages:
         st.divider()
         if st.button("🗑️ 清空对话", use_container_width=True):
-            st.session_state.memory = ConversationBufferMemory(
-                memory_key="chat_history", return_messages=True
-            )
+            st.session_state.thread_id = "chat-2"
             st.session_state.messages = []
+            st.session_state.agent = create_agent(
+                model=llm,
+                tools=tools,
+                system_prompt=(
+                    "你是一个智能 AI 助手。你可以使用工具来获取实时信息"
+                    "（天气、时间、IP 等）或进行计算。若用户闲聊，直接回答即可。"
+                    "回答简洁自然，使用中文。"
+                ),
+                checkpointer=MemorySaver(),
+            )
             st.rerun()
